@@ -82,8 +82,6 @@ def init_state():
         'base_elevation': '81.782～81.959',
         'test_method': '采用轻型(10kg)动力触探试验',
         'remark': '——',
-        'raw_paste_count': 0,
-        'sum_paste_count': 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -287,90 +285,87 @@ with st.expander("四、检测结果（支持增删行 + 批量粘贴）", expan
     tab1, tab2 = st.tabs(['表8 — 原始数据', '表9 — 结果汇总'])
 
     with tab1:
-        st.caption('格式：点号 / 检测深度(m) / 击数(击/10cm)')
+        st.caption('格式：点号 / 检测深度(m) / 击数(击/10cm)，Tab分隔，每行3列')
         raw_paste = st.text_area(
-            '粘贴表8数据（Tab分隔，每行3列）',
+            '粘贴表8数据',
             placeholder='1#（YS7+10）\t0.00~0.45\t42、51\n2#（YS7+20）\t0.00~0.45\t41、51',
             height=80, key='raw_paste')
-        if st.button('📋 解析表8', key='pr1'):
-            lines = raw_paste.strip().split('\n')
-            rd = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                parts = re.split(r'\t|\s{2,}', line.strip())
-                if len(parts) >= 2:
-                    rd.append({
-                        'point_id': parts[0],
-                        'depth': parts[1] if len(parts) > 1 else '',
-                        'blows': parts[2] if len(parts) > 2 else ''
-                    })
-            if rd:
-                st.session_state.raw_data = rd
-                st.session_state.raw_paste_count = st.session_state.get('raw_paste_count', 0) + 1
-                st.success(f'已替换为 {len(rd)} 行数据')
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button('📋 解析表8', key='pr1', use_container_width=True):
+                lines = raw_paste.strip().split('\n')
+                rd = []
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    parts = re.split(r'\t|\s{2,}', line.strip())
+                    if len(parts) >= 2:
+                        rd.append({
+                            'point_id': parts[0],
+                            'depth': parts[1] if len(parts) > 1 else '',
+                            'blows': parts[2] if len(parts) > 2 else ''
+                        })
+                if rd:
+                    st.session_state.raw_data = rd
+                    st.success(f'已替换为 {len(rd)} 行数据')
+                    st.rerun()
+        with c2:
+            if st.button('🗑️ 清空表8', key='clr_r', use_container_width=True):
+                st.session_state.raw_data = []
                 st.rerun()
+
         raw_data = st.session_state.raw_data
-        rk = st.session_state.get('raw_paste_count', 0)
-        to_del = []
-        for i, rd in enumerate(raw_data):
-            c1, c2, c3, c4 = st.columns([2.5, 2, 2, 0.7])
-            with c1: raw_data[i]['point_id'] = st.text_input('点号', rd['point_id'], key=f'rid_{rk}_{i}', label_visibility='collapsed')
-            with c2: raw_data[i]['depth'] = st.text_input('深度', rd['depth'], key=f'rdep_{rk}_{i}', label_visibility='collapsed')
-            with c3: raw_data[i]['blows'] = st.text_input('击数', rd['blows'], key=f'rbl_{rk}_{i}', label_visibility='collapsed')
-            with c4:
-                if st.button('✕', key=f'rdel_{i}'):
-                    to_del.append(i)
-        for i in sorted(to_del, reverse=True):
-            raw_data.pop(i)
-        if st.button('+ 添加行', key='ar1'):
-            raw_data.append({'point_id': '', 'depth': '', 'blows': ''})
-            st.rerun()
+        if raw_data:
+            st.caption(f'共 {len(raw_data)} 行（需要修改请重新粘贴）')
+            # 英文字段名映射为中文表头显示
+            import pandas as pd
+            df = pd.DataFrame(raw_data)
+            df.columns = ['点号', '检测深度(m)', '击数(击/10cm)']
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info('暂无数据，请粘贴后点"解析表8"')
 
     with tab2:
-        st.caption('格式：土层 / 点号 / 标高 / 平均击数 / 承载力')
+        st.caption('格式：土层 / 点号 / 标高 / 平均击数 / 承载力，Tab分隔，每行5列')
         sum_paste = st.text_area(
-            '粘贴表9数据（Tab分隔，每行5列）',
+            '粘贴表9数据',
             placeholder='素填土\t1#（YS7+10）\t81.782\t42.0\t208',
             height=80, key='sum_paste')
-        if st.button('📋 解析表9', key='ps2'):
-            lines = sum_paste.strip().split('\n')
-            sd = []
-            for line in lines:
-                if not line.strip():
-                    continue
-                parts = re.split(r'\t|\s{2,}', line.strip())
-                if len(parts) >= 4:
-                    sd.append({
-                        'soil_layer': parts[0] if parts[0] else '素填土',
-                        'point_id': parts[1] if len(parts) > 1 else '',
-                        'elevation': parts[2] if len(parts) > 2 else '',
-                        'avg_blows': parts[3] if len(parts) > 3 else '',
-                        'bearing_capacity': parts[4] if len(parts) > 4 else ''
-                    })
-            if sd:
-                st.session_state.summary_data = sd
-                st.session_state.sum_paste_count = st.session_state.get('sum_paste_count', 0) + 1
-                st.success(f'已替换为 {len(sd)} 行数据')
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            if st.button('📋 解析表9', key='ps2', use_container_width=True):
+                lines = sum_paste.strip().split('\n')
+                sd = []
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    parts = re.split(r'\t|\s{2,}', line.strip())
+                    if len(parts) >= 4:
+                        sd.append({
+                            'soil_layer': parts[0] if parts[0] else '素填土',
+                            'point_id': parts[1] if len(parts) > 1 else '',
+                            'elevation': parts[2] if len(parts) > 2 else '',
+                            'avg_blows': parts[3] if len(parts) > 3 else '',
+                            'bearing_capacity': parts[4] if len(parts) > 4 else ''
+                        })
+                if sd:
+                    st.session_state.summary_data = sd
+                    st.success(f'已替换为 {len(sd)} 行数据')
+                    st.rerun()
+        with c2:
+            if st.button('🗑️ 清空表9', key='clr_s', use_container_width=True):
+                st.session_state.summary_data = []
                 st.rerun()
+
         sum_data = st.session_state.summary_data
-        sk = st.session_state.get('sum_paste_count', 0)
-        to_del = []
-        for i, sd in enumerate(sum_data):
-            c1, c2, c3, c4, c5, c6 = st.columns([1.5, 1.8, 1.3, 1.3, 1.3, 0.7])
-            with c1: sum_data[i]['soil_layer'] = st.text_input('土层', sd.get('soil_layer', '素填土'), key=f'ss_{sk}_{i}', label_visibility='collapsed')
-            with c2: sum_data[i]['point_id'] = st.text_input('点号', sd['point_id'], key=f'sid_{sk}_{i}', label_visibility='collapsed')
-            with c3: sum_data[i]['elevation'] = st.text_input('标高', sd['elevation'], key=f'se_{sk}_{i}', label_visibility='collapsed')
-            with c4: sum_data[i]['avg_blows'] = st.text_input('击数', sd['avg_blows'], key=f'sa_{sk}_{i}', label_visibility='collapsed')
-            with c5: sum_data[i]['bearing_capacity'] = st.text_input('承载力', sd['bearing_capacity'], key=f'sb_{sk}_{i}', label_visibility='collapsed')
-            with c6:
-                if st.button('✕', key=f'sdel_{i}'):
-                    to_del.append(i)
-        for i in sorted(to_del, reverse=True):
-            sum_data.pop(i)
-        if st.button('+ 添加行', key='as2'):
-            sum_data.append({'soil_layer': '素填土', 'point_id': '', 'elevation': '', 'avg_blows': '', 'bearing_capacity': ''})
-            st.rerun()
+        if sum_data:
+            st.caption(f'共 {len(sum_data)} 行（需要修改请重新粘贴）')
+            import pandas as pd
+            df = pd.DataFrame(sum_data)
+            df.columns = ['土层', '点号', '标高', '平均击数', '承载力']
+            st.dataframe(df, use_container_width=True, hide_index=True)
+        else:
+            st.info('暂无数据，请粘贴后点"解析表9"')
 
 # ===== 五、结论与建议 =====
 with st.expander("五、结论与建议", expanded=True):
@@ -443,6 +438,49 @@ if st.button('⬇ 生成报告', type='primary', use_container_width=True):
             if auto_report_date and report_date == '2026年05月10日':
                 report_date = auto_report_date
 
+            # 表9：直接从粘贴框重新解析，绕过 session_state.summary_data
+            sum_paste_raw = st.session_state.get('sum_paste', '')
+            if sum_paste_raw:
+                lines = sum_paste_raw.strip().split('\n')
+                sd = []
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    parts = re.split(r'\t|\s{2,}', line.strip())
+                    if len(parts) >= 5:
+                        sd.append({
+                            'soil_layer': parts[0],
+                            'point_id': parts[1],
+                            'elevation': parts[2],
+                            'avg_blows': parts[3],
+                            'bearing_capacity': parts[4]
+                        })
+                summary_data = sd
+            else:
+                summary_data = st.session_state.summary_data
+
+            # 表8：直接从粘贴框重新解析
+            raw_paste_raw = st.session_state.get('raw_paste', '')
+            if raw_paste_raw:
+                lines = raw_paste_raw.strip().split('\n')
+                rd = []
+                for line in lines:
+                    if not line.strip():
+                        continue
+                    parts = re.split(r'\t|\s{2,}', line.strip())
+                    if len(parts) >= 3:
+                        rd.append({
+                            'point_id': parts[0],
+                            'depth': parts[1],
+                            'blows': parts[2] if len(parts) > 2 else ''
+                        })
+                raw_data = rd
+            else:
+                raw_data = st.session_state.raw_data
+
+
+
+
             data = {
                 'project_name': st.session_state.project_name,
                 'project_location': st.session_state.project_location,
@@ -477,8 +515,8 @@ if st.button('⬇ 生成报告', type='primary', use_container_width=True):
                 },
                 'geo_layers': st.session_state.geo_layers,
                 'instruments': st.session_state.instruments,
-                'raw_data': st.session_state.raw_data,
-                'summary_data': st.session_state.summary_data,
+                'raw_data': raw_data,
+                'summary_data': summary_data,
                 'suggestion_on': st.session_state.suggestion_on,
                 'suggestion_type': st.session_state.suggestion_type,
                 'images': st.session_state.appendix_images,
