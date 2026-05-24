@@ -309,7 +309,7 @@ with st.expander("四、检测结果（支持增删行 + 批量粘贴）", expan
                 st.rerun()
         raw_data = st.session_state.raw_data
         # 用数据长度 + hash 做 key，数据变了 key 一定变（Cloud 也生效）
-        table_key = f"{len(raw_data)}_{hash(str(raw_data[:1]))"
+        table_key = f"{len(raw_data)}_{hash(str(raw_data[:1]))}"
         to_del = []
         for i, rd in enumerate(raw_data):
             c1, c2, c3, c4 = st.columns([2.5, 2, 2, 0.7])
