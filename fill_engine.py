@@ -529,13 +529,22 @@ def fill_document(template_path, output_path, data):
             summary_data.append({'soil_layer': '素填土', 'point_id': '', 'elevation': '', 'avg_blows': '', 'bearing_capacity': ''})
     
     # 查找表9（通过表头识别，不依赖固定索引）
+    # 注意：模板表头可能有空格（如"土 层"），需先去除所有空白再匹配
     sum_table = None
-    for table in doc.tables:
+    for ti, table in enumerate(doc.tables):
         if len(table.rows) > 0:
-            header_text = ' '.join([cell.text for cell in table.rows[0].cells])
-            if '土层' in header_text and '承载力' in header_text:
+            header_text = ''.join([cell.text.strip() for cell in table.rows[0].cells])
+            header_clean = header_text.replace(' ', '').replace('\n', '').replace('\r', '')
+            if '土层' in header_clean and '承载力' in header_clean:
                 sum_table = table
+                print(f"DEBUG: 匹配到表9 at doc.tables[{ti}]，表头={header_clean!r}", flush=True)
                 break
+    if sum_table is None:
+        print(f"DEBUG: 未找到表9！所有表头如下：", flush=True)
+        for ti, table in enumerate(doc.tables):
+            if len(table.rows) > 0:
+                ht = ''.join([cell.text.strip() for cell in table.rows[0].cells])
+                print(f"  Table[{ti}]: {ht!r}", flush=True)
     
     if sum_table is not None and summary_data:
         # 删除所有数据行（保留表头）
@@ -543,11 +552,11 @@ def fill_document(template_path, output_path, data):
             tr = sum_table.rows[-1]._tr
             sum_table._tbl.remove(tr)
         
-        # 添加新数据行，强制第一列为素填土
+        # 添加新数据行
         for sd in summary_data:
             new_row = sum_table.add_row()
-            # 第一列强制设置为素填土
-            new_row.cells[0].text = '素填土'
+            # 第一列为土层名称，取粘贴数据中的 soil_layer，默认素填土
+            new_row.cells[0].text = str(sd.get('soil_layer', '素填土') or '素填土')
             # 填充其他列（第2-5列）
             if len(new_row.cells) > 1:
                 new_row.cells[1].text = str(sd.get('point_id', ''))
@@ -624,37 +633,6 @@ def fill_document(template_path, output_path, data):
         from docx.shared import Pt
         for row in sum_table.rows:
             row.height = Pt(25.4 * 0.9)  # 0.9cm
-
-        # 18. 合并 素填土 单元格 (Table[10] col 0)
-        rows = sum_table.rows
-        if len(rows) > 1:
-            i = 1
-            while i < len(rows):
-                cell_text = rows[i].cells[0].text.strip()
-                if '素填土' in cell_text:
-                    start = i
-                    while i < len(rows) and '素填土' in rows[i].cells[0].text.strip():
-                        i += 1
-                    end = i - 1
-                    if start < end:
-                        for mi in range(start, end + 1):
-                            tc = rows[mi].cells[0]._tc
-                            tcPr = tc.find(qn('w:tcPr'))
-                            if tcPr is None:
-                                tcPr = etree2.SubElement(tc, qn('w:tcPr'))
-                            vMerge = tcPr.find(qn('w:vMerge'))
-                            if vMerge is None:
-                                vMerge = etree2.SubElement(tcPr, qn('w:vMerge'))
-                            if mi == start:
-                                vMerge.set(qn('w:val'), 'restart')
-                            else:
-                                for p in rows[mi].cells[0].paragraphs:
-                                    for run in p.runs:
-                                        run.text = ''
-                                if qn('w:val') in vMerge.attrib:
-                                    del vMerge.attrib[qn('w:val')]
-                else:
-                    i += 1
 
     # 19. Table1 额外字段（工程概况表中跨列合并单元格）
     if len(doc.tables) > 1:
@@ -852,39 +830,8 @@ def fill_document(template_path, output_path, data):
                     else:
                         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
 
-        # 26. 表9：全居中 + 合并素填土 + 固定列宽 + 行高0.9cm
-    if len(doc.tables) > 10:
-        sum_table = doc.tables[10]
-        # 设置表9列宽
-        tbl_grid = sum_table._tbl.find(qn('w:tblGrid'))
-        if tbl_grid is not None:
-            grid_cols = tbl_grid.findall(qn('w:gridCol'))
-            col_widths = [1134, 1418, 1418, 1418, 1418, 1985]  # 约2,2.5,2.5,2.5,2.5,3.5cm
-            for i, w in enumerate(col_widths):
-                if i < len(grid_cols):
-                    grid_cols[i].set(qn('w:w'), str(w))
-
-        from docx.shared import Pt
-        for row in sum_table.rows:
-            # 设置行高0.9cm
-            row.height = Pt(28.35 * 0.9)
-            for cell in row.cells:
-                tc = cell._tc
-                tcPr = tc.find(qn('w:tcPr'))
-                if tcPr is None:
-                    tcPr = etree2.SubElement(tc, qn('w:tcPr'))
-                # 禁止换行
-                noWrap = tcPr.find(qn('w:noWrap'))
-                if noWrap is None:
-                    etree2.SubElement(tcPr, qn('w:noWrap'))
-                # 垂直居中
-                vAlign = tcPr.find(qn('w:vAlign'))
-                if vAlign is None:
-                    vAlign = etree2.SubElement(tcPr, qn('w:vAlign'))
-                vAlign.set(qn('w:val'), 'center')
-                # 水平居中
-                for p in cell.paragraphs:
-                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # 注意：表9（汇总表）已在 #17 中通过动态表头匹配完整处理（数据填充 + 格式 + 合并），
+    # 此处不再用硬索引 doc.tables[10] 重复处理，避免覆盖正确数据。
     # ===== 删除空白页（跳过含图片的段落）=====
     # 删除分页符后面的空段落
     for pi in range(len(doc.paragraphs) - 1, -1, -1):
