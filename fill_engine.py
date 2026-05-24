@@ -3,10 +3,12 @@
 基于内容模式匹配，不依赖段落顺序
 """
 from docx import Document
-from docx.shared import RGBColor
+from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
-import os, re
+import os, re, subprocess, time
+from lxml import etree as _ET
+_W = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 
 
 def _all_paragraphs(doc):
@@ -29,9 +31,12 @@ def _red_runs(p):
     """返回段落中红色run的 (run_index, run, text) 列表"""
     result = []
     for i, run in enumerate(p.runs):
-        if run.font.color and run.font.color.rgb:
-            if str(run.font.color.rgb).upper() == 'FF0000':
-                result.append((i, run, run.text))
+        try:
+            if run.font.color and run.font.color.rgb:
+                if str(run.font.color.rgb).upper() == 'FF0000':
+                    result.append((i, run, run.text))
+        except OSError:
+            pass
     return result
 
 
@@ -42,13 +47,19 @@ def _set_runs_text(p, new_text, red_only=True):
     if red_only:
         if reds:
             for i, (ri, run, _) in enumerate(reds):
-                run.text = str(new_text) if i == 0 else ''
-                run.font.color.rgb = BLACK
+                if i == 0:
+                    _safe_set_run_text(run, str(new_text))
+                else:
+                    _safe_set_run_text(run, '')
+                _safe_set_font_color(run, BLACK)
             return True
     else:
         for i, run in enumerate(p.runs):
-            run.text = str(new_text) if i == 0 else ''
-            run.font.color.rgb = BLACK
+            if i == 0:
+                _safe_set_run_text(run, str(new_text))
+            else:
+                _safe_set_run_text(run, '')
+            _safe_set_font_color(run, BLACK)
         return True
     return False
 
@@ -58,10 +69,52 @@ def _set_specific_red_run(p, run_index, new_text):
     reds = _red_runs(p)
     for ri, run, _ in reds:
         if ri == run_index:
-            run.text = str(new_text)
-            run.font.color.rgb = RGBColor(0, 0, 0)
+            _safe_set_run_text(run, str(new_text))
+            _safe_set_font_color(run, RGBColor(0, 0, 0))
             return True
     return False
+
+
+def _safe_set_run_text(run, text):
+    """安全设置 run.text，OSError 时回退到 lxml 直接操作 w:t"""
+    try:
+        run.text = str(text)
+    except OSError:
+        ns = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
+        ts = run._element.findall('w:t', ns)
+        if not ts:
+            ts = run._element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t')
+        if ts:
+            ts[0].text = str(text)
+            for t in ts[1:]:
+                t.text = ''
+
+
+def _safe_set_font_color(run, color):
+    """安全设置 run.font.color.rgb，OSError 时静默忽略"""
+    try:
+        run.font.color.rgb = color
+    except OSError:
+        pass
+
+
+def _safe_set_paragraph_text(p, text):
+    """纯 lxml 设置段落文本，完全绕过 Run/Paragraph .text 赋值"""
+    W = _W
+    # 删除所有 <w:r> 子元素
+    for r_elem in p._element.findall(f'{W}r'):
+        p._element.remove(r_elem)
+    # 新建 <w:r><w:t>文本</w:t></w:r>
+    r_elem = _ET.SubElement(p._element, f'{W}r')
+    t_elem = _ET.SubElement(r_elem, f'{W}t')
+    t_elem.text = str(text)
+
+
+def _safe_set_cell_text(cell, text):
+    """安全设置单元格文本（只写第一个 paragraph）"""
+    if len(cell.paragraphs) == 0:
+        return
+    _safe_set_paragraph_text(cell.paragraphs[0], text)
 
 
 def _match_and_replace_all_exact(paras, exact_match_text, new_text):
@@ -167,18 +220,19 @@ def fill_document(template_path, output_path, data):
             reds = _red_runs(p)
             for ri, run, _ in reds:
                 if 'DT' in run.text:
-                    run.text = data.get('report_number', '')
-                    run.font.color.rgb = RGBColor(0, 0, 0)
+                    _safe_set_run_text(run, data.get('report_number', ''))
+                    _safe_set_font_color(run, RGBColor(0, 0, 0))
                     break
 
     # 5. 检测日期
     date_str = data.get('test_date', '')
     first_date = date_str.split('、')[0].strip() if '、' in date_str else date_str
 
-    # 5a. 首页检测日期（startswith "检测日期："）
+    # 5a. 首页检测日期（支持全角/半角冒号，允许表格内匹配）
     for loc, p in all_p:
         full = p.text.strip()
-        if full.startswith('检测日期：') and not loc.startswith('table'):
+        full_nocolon = full.replace('：', ':').replace('：', ':')
+        if full_nocolon.startswith('检测日期:'):
             reds = _red_runs(p)
             if len(reds) >= 6:
                 parts = re.match(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})', first_date)
@@ -186,12 +240,18 @@ def fill_document(template_path, output_path, data):
                     y, m, d = parts.groups()
                     texts = ['20', y[2:], '年', m.zfill(2), '月', f'{d.zfill(2)}日']
                     for i, (ri, run, _) in enumerate(reds):
-                        run.text = texts[i] if i < len(texts) else ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                        if i < len(texts):
+                            _safe_set_run_text(run, texts[i])
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
                 else:
                     for i, (ri, run, _) in enumerate(reds):
-                        run.text = first_date if i == 0 else ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                        if i == 0:
+                            _safe_set_run_text(run, first_date)
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
             break
 
     # 5b. 短格式日期 "2026.05.08"（精确匹配）
@@ -206,11 +266,38 @@ def fill_document(template_path, output_path, data):
                 short = first_date
             _set_runs_text(p, short, True)
 
-    # 6. 报告日期
+    # ===== 7. 检测单位基本信息（动态变量）=====
+    test_unit_info = data.get('test_unit_info', '')
+    if test_unit_info:
+        unit_lines = test_unit_info.strip().split('\n')
+        unit_idx = 0
+        for loc, p in all_p:
+            full = p.text.strip()
+            if not loc.startswith('table') and (
+                full.startswith('检测单位：') or full.startswith('地    址：') or
+                full.startswith('邮    编：') or full.startswith('电    话：') or
+                full.startswith('传    真：') or full.startswith('监督电话：')
+            ):
+                if unit_idx < len(unit_lines):
+                    # 直接用 run.text 赋值，不依赖 _set_runs_text 的红跑检测
+                    for ri, run in enumerate(p.runs):
+                        _safe_set_run_text(run, unit_lines[unit_idx] if ri == 0 else '')
+                        try:
+                            run.font.color.rgb = RGBColor(0, 0, 0)
+                        except Exception:
+                            pass
+                    unit_idx += 1
+                else:
+                    for run in p.runs:
+                        _safe_set_run_text(run, '')
+
+    # 6. 报告日期（跳过检测日期段落和短格式日期）
     report_date = data.get('report_date', '')
     for loc, p in all_p:
         full = p.text.strip()
-        if re.match(r'^2026年\d{2}月\d{2}日$', full):
+        if full.startswith('检测日期：'):
+            continue
+        if re.match(r'^\d{4}年\d{2}月\d{2}日$', full):
             reds = _red_runs(p)
             if reds:
                 parts = re.match(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})', report_date)
@@ -218,13 +305,18 @@ def fill_document(template_path, output_path, data):
                     y, m, d = parts.groups()
                     texts = [y, '年', m.zfill(2), '月', d.zfill(2), '日']
                     for i, (ri, run, _) in enumerate(reds):
-                        run.text = texts[i] if i < len(texts) else ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                        if i < len(texts):
+                            _safe_set_run_text(run, texts[i])
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
                 else:
                     for i, (ri, run, _) in enumerate(reds):
-                        run.text = report_date if i == 0 else ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
-
+                        if i == 0:
+                            _safe_set_run_text(run, report_date)
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
     # 7. 承载力特征值 — 自动加 ≥ 前缀
     caps = data.get('bearing_capacities', '')
     # 确保承载力的每个值都带 ≥ 前缀
@@ -274,10 +366,75 @@ def fill_document(template_path, output_path, data):
             for p in t1.rows[5].cells[1].paragraphs:
                 for run in p.runs:
                     if 'JGJ' in run.text or 'DB42' in run.text or '检测依据' in run.text:
-                        run.text = disp
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                        _safe_set_run_text(run, disp)
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
                         if shrink_size:
                             run.font.size = shrink_size
+
+    # 7d. Table1 直接位置填充 — 检测性质/目的/项目/位置/结论/备注
+    if len(doc.tables) > 1:
+        t1 = doc.tables[1]
+        # 检测性质 row[2].cell[1]
+        tn = data.get('test_nature', '')
+        if tn and len(t1.rows) > 2 and len(t1.rows[2].cells) > 1:
+            _safe_set_cell_text(t1.rows[2].cells[1], tn)
+        # 检测目的 row[3].cell[1]
+        tp = data.get('test_purpose', '')
+        if tp and len(t1.rows) > 3 and len(t1.rows[3].cells) > 1:
+            _safe_set_cell_text(t1.rows[3].cells[1], tp)
+        # 检测项目 row[4].cell[1]
+        tpr = data.get('test_project', '')
+        if tpr and len(t1.rows) > 4 and len(t1.rows[4].cells) > 1:
+            _safe_set_cell_text(t1.rows[4].cells[1], tpr)
+        # 检测位置 row[10].cell[1]
+        pl = data.get('pile_range', '')
+        if pl and len(t1.rows) > 10 and len(t1.rows[10].cells) > 1:
+            _safe_set_cell_text(t1.rows[10].cells[1], pl)
+        # 检测结论 row[11].cell[1]
+        tc = data.get('test_conclusion', '')
+        if tc and len(t1.rows) > 11 and len(t1.rows[11].cells) > 1:
+            _safe_set_cell_text(t1.rows[11].cells[1], tc)
+        # 备注 row[12].cell[1]
+        rm = data.get('remark', '')
+        if rm and len(t1.rows) > 12 and len(t1.rows[12].cells) > 1:
+            _safe_set_cell_text(t1.rows[12].cells[1], rm)
+
+    # 7e. 在 Table[1] 中插入"检测单位"行（委托单位 row[1] 之后）
+    if len(doc.tables) > 1:
+        t1 = doc.tables[1]
+        # 提取检测单位名称
+        test_unit_name = ''
+        if test_unit_info:
+            # 先处理第一行：去除"检测单位："前缀和"（盖章）"后缀
+            first_line = test_unit_info.strip().split('\n')[0]
+            for old, new in [('检测单位：', ''), ('（盖章）', ''), ('(盖章)', '')]:
+                first_line = first_line.replace(old, new)
+            test_unit_name = first_line.strip()
+        if not test_unit_name:
+            test_unit_name = '湖北建夷检验检测中心有限公司'
+        # 检查是否已存在"检测单位"行（忽略空格）
+        has_test_unit = False
+        for row in t1.rows:
+            cell_text = row.cells[0].text.replace(' ', '').replace('\u3000', '').replace('\u0020', '')
+            if '检测单位' in cell_text:
+                _safe_set_cell_text(row.cells[1], test_unit_name)
+                has_test_unit = True
+                break
+        if not has_test_unit:
+            # 创建新行并插入到 row[1] 之后
+            tr = _ET.SubElement(t1._tbl, qn('w:tr'))
+            # Cell 0
+            tc0 = _ET.SubElement(tr, qn('w:tc'))
+            p0 = _ET.SubElement(tc0, qn('w:p'))
+            r0 = _ET.SubElement(p0, qn('w:r'))
+            _ET.SubElement(r0, qn('w:t')).text = '检 测 单 位'
+            # Cell 1
+            tc1 = _ET.SubElement(tr, qn('w:tc'))
+            p1 = _ET.SubElement(tc1, qn('w:p'))
+            r1 = _ET.SubElement(p1, qn('w:r'))
+            _ET.SubElement(r1, qn('w:t')).text = test_unit_name
+            # 移动到 row[1]（委托单位）之后
+            t1.rows[1]._tr.addnext(tr)
 
     # 8. 地基类型/土层 — 仅匹配 Table1 中的独立段落
     for loc, p in all_p:
@@ -297,13 +454,10 @@ def fill_document(template_path, output_path, data):
         if full.startswith('1、现场检测由委托方进行抽样') and not loc.startswith('table'):
             reds = _red_runs(p)
             if len(reds) >= 3:
-                # 抽检数量加"点"后缀（模板中"点"字在红色run之外，直接拼进去）
                 sc = str(data.get('sample_count', ''))
-                if sc and not sc.endswith('点'):
-                    sc += '点'
-                reds[0][1].text = sc
-                reds[1][1].text = str(data.get('test_depth_meters', ''))
-                reds[2][1].text = str(data.get('total_depth', ''))
+                _safe_set_run_text(reds[0][1], sc)
+                _safe_set_run_text(reds[1][1], str(data.get('test_depth_meters', '')))
+                _safe_set_run_text(reds[2][1], str(data.get('total_depth', '')))
             break
 
     # 10. 检测桩号范围 — 仅匹配前有"（具体点位见附图"的段落（桩号描述段）
@@ -322,61 +476,97 @@ def fill_document(template_path, output_path, data):
             reds = _red_runs(p)
             if reds:
                 for i, (ri, run, _) in enumerate(reds):
-                    run.text = conclusion if i == 0 else ''
-                    run.font.color.rgb = RGBColor(0, 0, 0)
+                    if i == 0:
+                        _safe_set_run_text(run, conclusion)
+                    else:
+                        _safe_set_run_text(run, '')
+                    _safe_set_font_color(run, RGBColor(0, 0, 0))
             # 也处理结论中分散的数字runs
             # 对于100kPa、6等分散runs，全部合并到第一个red run
             for i, (ri, run, _) in enumerate(reds):
-                run.text = conclusion if i == 0 else ''
-                run.font.color.rgb = RGBColor(0, 0, 0)
-
+                if i == 0:
+                    _safe_set_run_text(run, conclusion)
+                else:
+                    _safe_set_run_text(run, '')
+                _safe_set_font_color(run, RGBColor(0, 0, 0))
     # ===== 19. 结论、建议 =====
-        # ===== 19. 结论、建议 =====
     suggestion_on = data.get('suggestion_on', True)
     suggestion_type = data.get('suggestion_type', 'qualified')
     
-    # 根据类型直接生成建议内容
     if suggestion_type == 'qualified':
         suggestion_content = "2、基础施工过程中，望有关部门加强截排水及验槽工作。"
     else:
         suggestion_content = "2、建议对不满足设计要求的地基采取有效方式进行相应处理后再进行下一步施工。"
 
+    conclusion = data.get('test_conclusion', '')
+    section9_title_found = False
+    section9_conclusion_filled = False
+    
     for loc, p in all_p:
         full = p.text.strip()
-        # 标题行处理
-        if full == '九、结论、建议':
+        # 跳过 TOC 目录行（含 PAGEREF 域代码）
+        if 'PAGEREF' in full or 'TOC' in full.upper():
+            continue
+        # 标题行处理（灵活匹配：九开头 + 包含结论）
+        no_space = full.replace(' ', '').replace('\u3000', '')
+        if no_space.startswith('九') and ('结论' in no_space):
+            section9_title_found = True
+            # 修复标题为"九、结论、建议"或"九、结论"（取决于suggestion_on）
+            for i, run in enumerate(p.runs):
+                if (suggestion_on and i == 0):
+                    _safe_set_run_text(run, '九、结论、建议')
+                else:
+                    _safe_set_run_text(run, '九、结论' if (not suggestion_on and i == 0) else '')
+                _safe_set_font_color(run, RGBColor(0, 0, 0))
+            continue
+        # 结论段落处理（标题后的第一段，填充检测结论）
+        # 去掉 full and 条件：段落可能只有run但p.text为空
+        if section9_title_found and not section9_conclusion_filled and not full.startswith('2'):
             reds = _red_runs(p)
             if reds:
-                if suggestion_on:
-                    reds[0][1].text = '与建议'
-                    reds[0][1].font.color.rgb = RGBColor(0, 0, 0)
-                else:
-                    for run in p.runs:
-                        if run.text == '、建议':
-                            run.text = ''
+                for i, (ri, run, _) in enumerate(reds):
+                    if i == 0:
+                        _safe_set_run_text(run, conclusion)
+                    else:
+                        _safe_set_run_text(run, '')
+                    _safe_set_font_color(run, RGBColor(0, 0, 0))
+            else:
+                _set_runs_text(p, conclusion, False)
+            section9_conclusion_filled = True
+            continue
         # 建议段落处理
-        elif full.startswith('2') and ('望有关部门' in full or '基础施工' in full or '建议对不满足' in full):
+        if section9_title_found and full.startswith('2') and ('望有关部门' in full or '基础施工' in full or '建议对不满足' in full):
             if suggestion_on:
                 reds = _red_runs(p)
                 if reds:
-                    reds[0][1].text = suggestion_content
-                    reds[0][1].font.color.rgb = RGBColor(0, 0, 0)
-                else:
-                    for i, run in enumerate(p.runs):
-                        run.text = suggestion_content if i == 0 else ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                    for i, (ri, run, _) in enumerate(reds):
+                        if i == 0:
+                            _safe_set_run_text(run, suggestion_content)
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
             else:
                 for run in p.runs:
-                    run.text = ''
-                    run.font.color.rgb = RGBColor(0, 0, 0)
-
+                    _safe_set_run_text(run, '')
+                    _safe_set_font_color(run, RGBColor(0, 0, 0))
+    # 11b. Table2（项目概况）直接位置填充 — 证书编号/检测方法
+    if len(doc.tables) > 2:
+        t2 = doc.tables[2]
+        # 证书编号 row[7].cell[3]
+        cn = data.get('certificate_no', '')
+        if cn and len(t2.rows) > 7 and len(t2.rows[7].cells) > 3:
+            _safe_set_cell_text(t2.rows[7].cells[3], cn)
+        # 检测方法 row[11].cell[1]
+        tm = data.get('test_method', '')
+        if tm and len(t2.rows) > 11 and len(t2.rows[11].cells) > 1:
+            _safe_set_cell_text(t2.rows[11].cells[1], tm)
     # 12. 参建单位 — 精确匹配完整公司名
     unit_map = {
         '中国兵器工业北方勘察设计研究院有限公司': data.get('project_units', {}).get('survey', ''),
         '宜昌市城市规划设计研究院有限公司': data.get('project_units', {}).get('design', ''),
         '宜昌建投园林有限公司': data.get('project_units', {}).get('construction', ''),
         '湖北虹源工程咨询有限公司': data.get('project_units', {}).get('supervision', ''),
-        '杨勇': data.get('project_units', {}).get('manager', ''),
+        '杨勇': data.get('project_units', {}).get('construction_unit', ''),
         '宜昌市市政工程质量安全监督站': data.get('project_units', {}).get('quality_station', ''),
     }
     for loc, p in all_p:
@@ -385,72 +575,140 @@ def fill_document(template_path, output_path, data):
             _set_runs_text(p, unit_map[full], True)
 
     # 13. 地质概况概述段落
-    geo_mode = data.get('geo_mode', 'full')
+    # 匹配"二、地质概况"标题后的第一个正文段落（包含"由...提供的《岩土工程勘察报告》"）
+    geo_desc_text = data.get('geo_description', '')
     pile = data.get('pile_range', '')
     ft = data.get('foundation_type', '')
     sl = data.get('soil_layer', '')
+    survey = data.get('project_units', {}).get('survey', '')
 
     for loc, p in all_p:
         full = p.text.strip()
-        if full.startswith('由') and '提供的《岩土工程勘察报告》' in full and not loc.startswith('table'):
-            if geo_mode == 'simple':
-                # 简化模式：替换为 "本次检测{pile_range}，地基类型为{foundation_type}，换填的主要土层为{soil_layer}。"
-                simple_text = f'本次检测{pile}，地基类型为{ft}，换填的主要土层为{sl}。'
-                _set_runs_text(p, simple_text, False)
+        # 移除 not loc.startswith('table')，允许匹配表格中的段落
+        if full.startswith('由') and '提供的《岩土工程勘察报告》' in full:
+            # 优先使用用户自定义的地质概况描述
+            if geo_desc_text:
+                _apply_superscript(p, geo_desc_text)
             else:
-                # 完整模式：逐个红run替换
-                reds = _red_runs(p)
-                survey = data.get('project_units', {}).get('survey', '')
-                pile_handled = False
-
-                for ri, run, old_text in reds:
-                    ot = old_text.strip()
-                    # 勘察单位
-                    if '中国兵器' in ot or '勘察研究' in ot:
-                        run.text = survey
-                        run.font.color.rgb = RGBColor(0, 0, 0)
-                    # 桩号范围（可能分两个run: YS7-YS9 + 雨水管道沟槽）
-                    elif ('YS7' in ot or 'YS8' in ot) and not pile_handled:
-                        run.text = pile
-                        run.font.color.rgb = RGBColor(0, 0, 0)
-                        pile_handled = True
-                    # 桩号范围后半部分（只有"雨水管道沟槽"等描述文字）
-                    elif ('雨水管道沟槽' in ot or '污水管道沟槽' in ot) and pile_handled:
-                        run.text = ''
-                        run.font.color.rgb = RGBColor(0, 0, 0)
-                    # 地基类型
-                    elif '天然地基' in ot:
-                        run.text = ft
-                        run.font.color.rgb = RGBColor(0, 0, 0)
-                    # 土层描述
-                    elif ot == '素填土':
-                        run.text = sl
-                        run.font.color.rgb = RGBColor(0, 0, 0)
+                # 按锚点文字定位：在"本次检测"/"地基类型为"/"主要土层为"后面的红run替换
+                runs = list(p.runs)
+                # 先尝试按锚点替换
+                anchored = False
+                for anchor, val in [('本次检测', pile), ('地基类型为', ft), ('主要土层为', sl)]:
+                    # 找到锚点文字所在的run，替换其后第一个红run
+                    hit_anchor = False
+                    for ri, run in enumerate(runs):
+                        rt = run.text or ''
+                        if not hit_anchor and anchor in rt:
+                            hit_anchor = True
+                            continue
+                        if hit_anchor:
+                            try:
+                                if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
+                                    _safe_set_run_text(run, val)
+                                    _safe_set_font_color(run, RGBColor(0, 0, 0))
+                                    anchored = True
+                                    break
+                            except OSError:
+                                pass
+                # 回退：如果锚点方式未命中，使用原来的red_runs整体替换
+                if not anchored:
+                    reds = _red_runs(p)
+                    pile_handled = False
+                    for ri, run, old_text in reds:
+                        ot = old_text.strip()
+                        if '中国兵器' in ot or '勘察研究' in ot:
+                            _safe_set_run_text(run, survey)
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
+                        elif ('YS7' in ot or 'YS8' in ot) and not pile_handled:
+                            _safe_set_run_text(run, pile)
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
+                            pile_handled = True
+                        elif ('雨水管道沟槽' in ot or '污水管道沟槽' in ot) and pile_handled:
+                            _safe_set_run_text(run, '')
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
+                        elif '天然地基' in ot:
+                            _safe_set_run_text(run, ft)
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
+                        elif ot == '素填土':
+                            _safe_set_run_text(run, sl)
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
             break
 
-    # 14. 检测依据 — 第三章 第1条（替换，保留序号格式）
-    testing_standards_item1 = data.get('testing_standards_item1', '')
-    if testing_standards_item1:
-        for loc, p in all_p:
-            full = p.text.strip()
-            if full == '1、《建筑地基检测技术规范》（JGJ 340-2015）；':
-                for i, run in enumerate(p.runs):
-                    run.text = f'1、{testing_standards_item1}；' if i == 0 else ''
-                    run.font.color.rgb = RGBColor(0, 0, 0)
-                break
+    # 14. 检测依据 — 第三章（动态编号）
+    # 只在"三、检测依据"章节内替换，避免误匹配第四节的固定内容
+    testing_item1 = data.get('testing_standards_item1', '')
+    testing_item2 = data.get('testing_standards_chapter3', '')
+    extra_items = data.get('extra_testing_items', [])
+    fixed_item_num = data.get('fixed_item_num', 3)
+    all_items = [testing_item1, testing_item2] + extra_items
+    all_items = [x for x in all_items if x]  # 过滤空值
 
-    # 14b. 检测依据 — 第三章 第2条（替换，保留第3条不变）
-    testing_standards_chapter3 = data.get('testing_standards_chapter3', '')
-    if testing_standards_chapter3:
+    if all_items:
+        item_idx = 0
+        last_detection_p = None
+        in_detection_section = False
         for loc, p in all_p:
             full = p.text.strip()
-            if full == '2、《岩土工程勘察规程》（DB42/T 169-2022）；':
+            # 进入"三、检测依据"章节
+            no_space = full.replace(' ', '').replace('\u3000', '')
+            if no_space.startswith('三') and ('检测依据' in no_space or '检测依据' in full):
+                in_detection_section = True
+                continue
+            # 离开检测依据章节（碰到下一个章节标题）
+            if in_detection_section and (
+                (no_space and no_space[0] in '四五六七八九十') or
+                full.startswith('四、') or full.startswith('五、') or
+                full.startswith('六、') or full.startswith('七、') or
+                full.startswith('八、') or full.startswith('九、')
+            ):
+                in_detection_section = False
+            if not in_detection_section:
+                continue
+            # 只在检测依据章节内匹配 1、2、 开头的段落
+            if re.match(r'^[12]、', full) and not loc.startswith('table'):
+                if item_idx < len(all_items):
+                    for i, run in enumerate(p.runs):
+                        if i == 0:
+                            _safe_set_run_text(run, f'{item_idx+1}、{all_items[item_idx]}；')
+                        else:
+                            _safe_set_run_text(run, '')
+                        _safe_set_font_color(run, RGBColor(0, 0, 0))
+                    item_idx += 1
+                    last_detection_p = p
+                else:
+                    for run in p.runs:
+                        _safe_set_run_text(run, '')
+            elif full.startswith('3、本工程设计文件及相关要求'):
                 for i, run in enumerate(p.runs):
-                    run.text = f'2、{testing_standards_chapter3}；' if i == 0 else ''
-                    run.font.color.rgb = RGBColor(0, 0, 0)
+                    if i == 0:
+                        _safe_set_run_text(run, f'{fixed_item_num}、本工程设计文件及相关要求。')
+                    else:
+                        _safe_set_run_text(run, '')
+                    _safe_set_font_color(run, RGBColor(0, 0, 0))
                 break
+        
+        # 如果有超过2条检测依据，在固定条目之前插入额外段落
+        if len(all_items) > 2 and last_detection_p is not None:
+            from docx.oxml import OxmlElement as _O
+            ref = last_detection_p._element
+            for extra_idx in range(2, len(all_items)):
+                new_p = _O('w:p')
+                ref.addnext(new_p)
+                ref = new_p
+                new_p_elem = None
+                for pp in doc.paragraphs:
+                    if pp._element == new_p:
+                        new_p_elem = pp
+                        break
+                if new_p_elem is not None:
+                    run = new_p_elem.add_run(f'{extra_idx+1}、{all_items[extra_idx]}；')
+                    run.font.size = Pt(12)
+                    run.font.name = '宋体'
+                    run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
 
     # 15. 地质概况表格 (Table 3: 6x2)
+    geo_mode = data.get('geo_mode', 'full')
     geo_layers = data.get('geo_layers', [])
 
     if len(doc.tables) > 3:
@@ -473,30 +731,37 @@ def fill_document(template_path, output_path, data):
                         # 清空其余 paragraph
                         for pi in range(1, len(cell0.paragraphs)):
                             for run in cell0.paragraphs[pi].runs:
-                                run.text = ''
-                                run.font.color.rgb = RGBColor(0, 0, 0)
+                                _safe_set_run_text(run, '')
+                                _safe_set_font_color(run, RGBColor(0, 0, 0))
                     desc = layer.get('description', '')
-                    for p in row.cells[1].paragraphs:
+                    if len(row.cells[1].paragraphs) > 0:
+                        p = row.cells[1].paragraphs[0]
                         reds = _red_runs(p)
                         if reds:
                             for j, (rj, run, _) in enumerate(reds):
-                                run.text = desc if j == 0 else ''
-                                run.font.color.rgb = RGBColor(0, 0, 0)
-                            break
+                                _safe_set_run_text(run, str(desc) if j == 0 else '')
+                                _safe_set_font_color(run, RGBColor(0, 0, 0))
                 else:
                     new_row = geo_table.add_row()
-                    new_row.cells[0].text = layer.get('name', '')
-                    new_row.cells[1].text = layer.get('description', '')
+                    _safe_set_cell_text(new_row.cells[0], layer.get('name', ''))
+                    _safe_set_cell_text(new_row.cells[1], layer.get('description', ''))
             # 删除多余行
             while len(geo_table.rows) > len(geo_layers) + 1:
                 tr = geo_table.rows[-1]._tr
                 geo_table._tbl.remove(tr)
 
-    # 15. 仪器表格 (Table 4: 3x4)
+    # 15. 仪器表格（动态行数）
     instruments = data.get('instruments', [])
     if len(doc.tables) > 4 and instruments:
         inst_table = doc.tables[4]
-        for ri in range(min(len(instruments), 2)):
+        header_rows = 1
+        needed = len(instruments) + header_rows
+        while len(inst_table.rows) < needed:
+            inst_table.add_row()
+        while len(inst_table.rows) > needed:
+            tr = inst_table.rows[-1]._tr
+            inst_table._tbl.remove(tr)
+        for ri in range(len(instruments)):
             row = inst_table.rows[ri + 1]
             inst = instruments[ri]
             for ci, col_key in enumerate(['name', 'number', 'calib_date', 'cert_number']):
@@ -519,7 +784,7 @@ def fill_document(template_path, output_path, data):
         for rd in raw_data:
             new_row = raw_table.add_row()
             for ci, col_key in enumerate(['point_id', 'depth', 'blows']):
-                new_row.cells[ci].paragraphs[0].text = str(rd.get(col_key, ''))
+                _safe_set_cell_text(new_row.cells[ci], str(rd.get(col_key, '')))
 
         # 17. 汇总表 (Table 9)
     summary_data = data.get('summary_data', [])
@@ -537,40 +802,49 @@ def fill_document(template_path, output_path, data):
             header_clean = header_text.replace(' ', '').replace('\n', '').replace('\r', '')
             if '土层' in header_clean and '承载力' in header_clean:
                 sum_table = table
-                print(f"DEBUG: 匹配到表9 at doc.tables[{ti}]，表头={header_clean!r}", flush=True)
                 break
-    if sum_table is None:
-        print(f"DEBUG: 未找到表9！所有表头如下：", flush=True)
-        for ti, table in enumerate(doc.tables):
-            if len(table.rows) > 0:
-                ht = ''.join([cell.text.strip() for cell in table.rows[0].cells])
-                print(f"  Table[{ti}]: {ht!r}", flush=True)
     
     if sum_table is not None and summary_data:
+        # 写调试日志
+        with open('debug_log.txt', 'a', encoding='utf-8') as _dl:
+            _dl.write(f'--- fill_engine #17 START ---\n')
+            _dl.write(f'summary_data rows={len(summary_data)}\n')
+        
         # 删除所有数据行（保留表头）
         while len(sum_table.rows) > 1:
             tr = sum_table.rows[-1]._tr
             sum_table._tbl.remove(tr)
         
         # 添加新数据行
-        for sd in summary_data:
+        for idx, sd in enumerate(summary_data):
             new_row = sum_table.add_row()
             # 第一列为土层名称，取粘贴数据中的 soil_layer，默认素填土
-            new_row.cells[0].text = str(sd.get('soil_layer', '素填土') or '素填土')
+            soil_name = str(sd.get('soil_layer', '素填土') or '素填土')
+            with open('debug_log.txt', 'a', encoding='utf-8') as _dl:
+                _dl.write(f'Row{idx+1}: soil_name={soil_name!r}\n')
+            c0 = new_row.cells[0]
+            # 清除原有内容后写入（避免 .text = 在合并单元格场景下失败）
+            for p in c0.paragraphs:
+                for r in p.runs:
+                    _safe_set_run_text(r, '')
+            c0.paragraphs[0].add_run(soil_name)
+            c0.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            with open('debug_log.txt', 'a', encoding='utf-8') as _dl:
+                _dl.write(f'Row{idx+1}: cell.text after write={c0.text!r}\n')
             # 填充其他列（第2-5列）
             if len(new_row.cells) > 1:
-                new_row.cells[1].text = str(sd.get('point_id', ''))
+                _safe_set_cell_text(new_row.cells[1], str(sd.get('point_id', '')))
             if len(new_row.cells) > 2:
-                new_row.cells[2].text = str(sd.get('elevation', ''))
+                _safe_set_cell_text(new_row.cells[2], str(sd.get('elevation', '')))
             if len(new_row.cells) > 3:
-                new_row.cells[3].text = str(sd.get('avg_blows', ''))
+                _safe_set_cell_text(new_row.cells[3], str(sd.get('avg_blows', '')))
             if len(new_row.cells) > 4:
-                new_row.cells[4].text = str(sd.get('bearing_capacity', ''))
+                _safe_set_cell_text(new_row.cells[4], str(sd.get('bearing_capacity', '')))
         
-        # 确保所有数据行的第一列都是素填土
+        # 仅补充空白的第一列（不再强制覆盖为素填土）
         for row_idx in range(1, len(sum_table.rows)):
-            if sum_table.rows[row_idx].cells[0].text.strip() != '素填土':
-                sum_table.rows[row_idx].cells[0].text = '素填土'
+            if not sum_table.rows[row_idx].cells[0].text.strip():
+                _safe_set_cell_text(sum_table.rows[row_idx].cells[0], '素填土')
         
         # 设置列宽
         tbl_grid = sum_table._tbl.find(qn('w:tblGrid'))
@@ -623,7 +897,7 @@ def fill_document(template_path, output_path, data):
                             else:
                                 for p in rows[mi].cells[0].paragraphs:
                                     for run in p.runs:
-                                        run.text = ''
+                                        _safe_set_run_text(run, '')
                                 if qn('w:val') in vMerge.attrib:
                                     del vMerge.attrib[qn('w:val')]
                 else:
@@ -681,9 +955,11 @@ def fill_document(template_path, output_path, data):
                     if reds:
                         # 只替换红色 run，保留黑色前缀不变
                         for i, (ri, run, _) in enumerate(reds):
-                            run.text = conclusion if i == 0 else ''
-                            run.font.color.rgb = RGBColor(0, 0, 0)
-
+                            if i == 0:
+                                _safe_set_run_text(run, conclusion)
+                            else:
+                                _safe_set_run_text(run, '')
+                            _safe_set_font_color(run, RGBColor(0, 0, 0))
     # 20. Table2 工程概况表（第二页）
     if len(doc.tables) > 2:
         t2 = doc.tables[2]
@@ -701,6 +977,8 @@ def fill_document(template_path, output_path, data):
                 if len(t2.rows[9].cells) > 1:
                     for p in t2.rows[9].cells[1].paragraphs:
                         _set_runs_text(p, data.get('structure_type', ''), True)
+                        for run in p.runs:
+                            run.font.size = Pt(14)
                 if len(t2.rows[9].cells) > 3:
                     for p in t2.rows[9].cells[3].paragraphs:
                         _set_runs_text(p, data.get('base_type', ''), True)
@@ -708,15 +986,15 @@ def fill_document(template_path, output_path, data):
                 # 设计承载力特征值 / 基底高程
                 if len(t2.rows[10].cells) > 1:
                     for p in t2.rows[10].cells[1].paragraphs:
-                        _set_runs_text(p, data.get('design_bearing_capacity', ''), True)
+                        _set_runs_text(p, data.get('bearing_capacities', ''), True)
                 if len(t2.rows[10].cells) > 3:
                     for p in t2.rows[10].cells[3].paragraphs:
-                        _set_runs_text(p, data.get('elevation_range', ''), True)
+                        _set_runs_text(p, data.get('base_elevation', ''), True)
             elif row_idx == 12:
                 # 备注
                 if len(t2.rows[12].cells) > 1:
                     for p in t2.rows[12].cells[1].paragraphs:
-                        _set_runs_text(p, data.get('remarks', ''), True)
+                        _set_runs_text(p, data.get('remark', ''), True)
 
     # 21. 附图插入
     images = data.get('images', [])
@@ -735,7 +1013,7 @@ def fill_document(template_path, output_path, data):
         # 如果没找到，在文档末尾添加
         if target_para is None:
             target_para = doc.add_paragraph()
-            target_para.text = '十、附图'
+            _safe_set_paragraph_text(target_para, '十、附图')
         
         # 在附图标题后插入图片
         for img_info in images:
@@ -805,9 +1083,9 @@ def fill_document(template_path, output_path, data):
                     grid_cols[i].set(qn('w:w'), str(w))
 
         from docx.shared import Pt
-        for row in raw_table.rows:
+        for ri, row in enumerate(raw_table.rows):
             # 设置行高0.9cm
-            row.height = Pt(28.35 * 0.9)  # 0.9cm = 约25.4磅
+            row.height = Pt(28.35 * 0.9)
             # 单元格禁止换行 + 对齐 + 垂直居中
             for ci, cell in enumerate(row.cells):
                 tc = cell._tc
@@ -823,9 +1101,11 @@ def fill_document(template_path, output_path, data):
                 if vAlign is None:
                     vAlign = etree2.SubElement(tcPr, qn('w:vAlign'))
                 vAlign.set(qn('w:val'), 'center')
-                # 对齐
+                # 对齐：第一行全部居中，其余行前两列居中、第三列左对齐
                 for p in cell.paragraphs:
-                    if ci <= 1:
+                    if ri == 0:
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    elif ci <= 1:
                         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     else:
                         p.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -873,27 +1153,79 @@ def fill_document(template_path, output_path, data):
     # 正文段落
     for p in doc.paragraphs:
         for run in p.runs:
-            if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
-                run.font.color.rgb = BLACK
+            try:
+                if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
+                    _safe_set_font_color(run, BLACK)
+            except OSError:
+                pass
     # 表格
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     for run in p.runs:
-                        if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
-                            run.font.color.rgb = BLACK
+                        try:
+                            if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
+                                _safe_set_font_color(run, BLACK)
+                        except OSError:
+                            pass
     # 页眉/页脚
     for section in doc.sections:
         for hdr in [section.header, section.first_page_header, section.even_page_header]:
             if hdr:
                 for p in hdr.paragraphs:
                     for run in p.runs:
-                        if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
-                            run.font.color.rgb = BLACK
-
+                        try:
+                            if run.font.color and run.font.color.rgb and str(run.font.color.rgb).upper() == 'FF0000':
+                                _safe_set_font_color(run, BLACK)
+                        except OSError:
+                            pass
+    # ===== 标题居中：首页"圆锥动力触探试验" =====
+    for p in doc.paragraphs:
+        if '圆锥动力触探试验' in p.text and '检测报告' not in p.text:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            break
+    
+    # ===== 检测深度间隔符号：保持与输入一致 =====
+    test_depth = data.get('test_depth_range', '')
+    for loc, p in all_p:
+        full = p.text.strip()
+        if re.match(r'^\d+\.\d+[～~]\d+\.\d+$', full):
+            _set_runs_text(p, test_depth, True)
+    
     doc.save(output_path)
     return output_path
+
+
+def _apply_superscript(paragraph, text):
+    """将段落文本中的 ^{...} 标记转换为上标运行
+    例: "Q4^{al+pl}" → Q4 正常 + al+pl 上标
+    返回处理后的纯文本（无标记）
+    """
+    import re as _re
+    pattern = r'\^\{([^}]+)\}'
+    if not _re.search(pattern, text):
+        return text
+    
+    # 清除段落原有内容
+    for r in paragraph.runs:
+        r.text = ''
+    
+    idx = 0
+    for m in _re.finditer(pattern, text):
+        prefix = text[idx:m.start()]
+        if prefix:
+            _safe_set_run_text(paragraph.runs[0], prefix if not paragraph.runs[0].text else '')
+        sup_text = m.group(1)
+        r_sup = paragraph.add_run(sup_text)
+        r_sup.font.superscript = True
+        idx = m.end()
+    
+    tail = text[idx:]
+    if tail:
+        paragraph.add_run(tail)
+    
+    return _re.sub(pattern, r'\1', text)
 
 
 def _safe_log(msg):
