@@ -8,6 +8,42 @@ import traceback
 from datetime import datetime, timedelta
 from fill_engine import fill_document, refresh_toc
 
+# ===== 轻型动力触探查表（JGJ340-2015）=====
+
+_REF_TABLES = {
+    '一般黏性土地基': {
+        'ref': [(5,50),(10,70),(15,90),(20,115),(25,135),(30,160),(35,180),(40,200),(45,220),(50,240)],
+        'inputs': [6.4,14,17,21,28,30.5,35.5,41.5,46,48],
+    },
+    '黏性素填土地基': {
+        'ref': [(5,60),(10,80),(15,95),(20,110),(25,120),(30,130),(35,140),(40,150),(45,160),(50,170)],
+        'inputs': [5,10,15,23,28.5,32,37,41.3,45,50],
+    },
+    '粉土、粉细砂土地基': {
+        'ref': [(5,55),(10,70),(15,80),(20,90),(25,100),(30,110),(35,125),(40,140),(45,150),(50,160)],
+        'inputs': [5,12,None,30,26.7,33.3,37,30,45,50],
+    },
+}
+
+
+def _trend_interp(ref_table, x):
+    """TREND 线性插值：在 ref_table[(x1,y1),...] 中查找 x 对应的 y"""
+    if x is None:
+        return None
+    pts = sorted(ref_table, key=lambda p: p[0])
+    if x <= pts[0][0]:
+        return round(pts[0][1], 1)
+    if x >= pts[-1][0]:
+        return round(pts[-1][1], 1)
+    for i in range(len(pts) - 1):
+        x1, y1 = pts[i]
+        x2, y2 = pts[i + 1]
+        if x1 <= x <= x2:
+            if x2 == x1:
+                return round(y1, 1)
+            return round(y1 + (y2 - y1) * (x - x1) / (x2 - x1), 1)
+    return None
+
 st.set_page_config(page_title="轻型动力触探检测报告生成", page_icon="📋", layout="wide")
 
 st.markdown("""
@@ -429,7 +465,7 @@ with st.expander("检测依据（第三章）", expanded=True):
     if st.button('+ 添加检测依据', key='tiadd'):
         items.append('')
         st.rerun()
-    fixed_item_num = st.number_input('固定末尾条编号', min_value=1, max_value=20, value=len(items)+1, key='fixed_item_num')
+    fixed_item_num = len(items) + 1
     st.caption(f'💡 固定末尾：{fixed_item_num}、本工程设计文件及相关要求。')
 
 # ===== 三、现场检测及仪器 =====
@@ -609,6 +645,35 @@ with st.expander("四、检测结果（表8原始数据 + 表9汇总）", expand
     else:
         st.info('请粘贴表9数据后点"解析表9"')
 
+    # 轻型动力触探查表（JGJ340-2015，仅 UI 显示，不输出到 Word）
+    st.markdown("---")
+    st.markdown("### 📋 轻型动力触探查表（JGJ340-2015 附录B）")
+
+    for tbl_name, tbl_data in _REF_TABLES.items():
+        with st.expander(f'{tbl_name} — 承载力查表', expanded=False):
+            ref = tbl_data['ref']
+            inputs = tbl_data['inputs']
+            st.caption('前两列为标准参考值，第三列输入平均锤击数，第四列自动插值计算承载力')
+            for i in range(len(ref)):
+                n10, fak = ref[i]
+                x_val = inputs[i] if i < len(inputs) else None
+                key_avg = f'rt_{tbl_name}_avg_{i}'
+                if key_avg not in st.session_state:
+                    st.session_state[key_avg] = x_val
+                c1, c2, c3, c4 = st.columns([1.2, 1.4, 1.4, 1.4])
+                with c1:
+                    st.caption(f'N₁₀={n10}')
+                with c2:
+                    st.caption(f'fₐₖ={fak} kPa')
+                with c3:
+                    val = st.number_input(
+                        '平均锤击数', value=float(st.session_state[key_avg]) if st.session_state[key_avg] is not None else 0.0,
+                        step=0.1, key=key_avg, label_visibility='collapsed', format='%.1f'
+                    )
+                with c4:
+                    result = _trend_interp(ref, val) if val else '-'
+                    st.caption(f'**{result} kPa**' if result != '-' else '-')
+
 # ===== 五、结论与建议 =====
 with st.expander("五、结论与建议", expanded=True):
     st.text_area('检测结论（自动同步首页）', st.session_state.test_conclusion, height=80, disabled=True)
@@ -750,8 +815,8 @@ if st.button('⬇ 生成报告', type='primary', use_container_width=True):
             testing_item1 = testing_items[0] if len(testing_items) > 0 else ''
             testing_item2 = testing_items[1] if len(testing_items) > 1 else ''
             extra_items = testing_items[2:] if len(testing_items) > 2 else []
-            # 使用用户手动设置的 fixed_item_num，否则自动计算
-            fixed_item_num = st.session_state.get('fixed_item_num', len(testing_items) + 1)
+            # 固定末尾编号 = 检测依据条数 + 1
+            fixed_item_num = len(testing_items) + 1
 
             data = {
                 'project_name': st.session_state.project_name,
