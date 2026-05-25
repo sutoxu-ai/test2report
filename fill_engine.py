@@ -279,7 +279,12 @@ def fill_document(template_path, output_path, data):
                 full.startswith('传    真：') or full.startswith('监督电话：')
             ):
                 if unit_idx < len(unit_lines):
-                    # 直接用 run.text 赋值，不依赖 _set_runs_text 的红跑检测
+                    # 确保至少有一个 run
+                    if not p.runs:
+                        r = _ET.SubElement(p._element, qn('w:r'))
+                        _ET.SubElement(r, qn('w:rPr'))
+                        _ET.SubElement(r, qn('w:t')).text = ''
+                        # 重新获取 runs
                     for ri, run in enumerate(p.runs):
                         _safe_set_run_text(run, unit_lines[unit_idx] if ri == 0 else '')
                         try:
@@ -398,43 +403,6 @@ def fill_document(template_path, output_path, data):
         rm = data.get('remark', '')
         if rm and len(t1.rows) > 12 and len(t1.rows[12].cells) > 1:
             _safe_set_cell_text(t1.rows[12].cells[1], rm)
-
-    # 7e. 在 Table[1] 中插入"检测单位"行（委托单位 row[1] 之后）
-    if len(doc.tables) > 1:
-        t1 = doc.tables[1]
-        # 提取检测单位名称
-        test_unit_name = ''
-        if test_unit_info:
-            # 先处理第一行：去除"检测单位："前缀和"（盖章）"后缀
-            first_line = test_unit_info.strip().split('\n')[0]
-            for old, new in [('检测单位：', ''), ('（盖章）', ''), ('(盖章)', '')]:
-                first_line = first_line.replace(old, new)
-            test_unit_name = first_line.strip()
-        if not test_unit_name:
-            test_unit_name = '湖北建夷检验检测中心有限公司'
-        # 检查是否已存在"检测单位"行（忽略空格）
-        has_test_unit = False
-        for row in t1.rows:
-            cell_text = row.cells[0].text.replace(' ', '').replace('\u3000', '').replace('\u0020', '')
-            if '检测单位' in cell_text:
-                _safe_set_cell_text(row.cells[1], test_unit_name)
-                has_test_unit = True
-                break
-        if not has_test_unit:
-            # 创建新行并插入到 row[1] 之后
-            tr = _ET.SubElement(t1._tbl, qn('w:tr'))
-            # Cell 0
-            tc0 = _ET.SubElement(tr, qn('w:tc'))
-            p0 = _ET.SubElement(tc0, qn('w:p'))
-            r0 = _ET.SubElement(p0, qn('w:r'))
-            _ET.SubElement(r0, qn('w:t')).text = '检 测 单 位'
-            # Cell 1
-            tc1 = _ET.SubElement(tr, qn('w:tc'))
-            p1 = _ET.SubElement(tc1, qn('w:p'))
-            r1 = _ET.SubElement(p1, qn('w:r'))
-            _ET.SubElement(r1, qn('w:t')).text = test_unit_name
-            # 移动到 row[1]（委托单位）之后
-            t1.rows[1]._tr.addnext(tr)
 
     # 8. 地基类型/土层 — 仅匹配 Table1 中的独立段落
     for loc, p in all_p:
