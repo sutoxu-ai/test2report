@@ -648,7 +648,7 @@ with st.expander("六、附图（可上传多张图片）", expanded=True):
                     f.write(uploaded.getbuffer())
                 imgs[i]['path'] = temp_path
         with c3:
-            if st.button('✕', key=f'idel_{i}'):
+            if st.button('✕', key=f'idel_img_{i}'):
                 to_del.append(i)
     for i in sorted(to_del, reverse=True):
         imgs.pop(i)
