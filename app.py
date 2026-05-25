@@ -632,6 +632,24 @@ with st.expander("五、结论与建议", expanded=True):
 # ===== 六、附图 =====
 with st.expander("六、附图（可上传多张图片）", expanded=True):
     imgs = st.session_state.appendix_images
+
+    # 批量上传
+    batch_files = st.file_uploader(
+        '📁 批量上传图片', type=['png', 'jpg', 'jpeg', 'bmp'],
+        accept_multiple_files=True, key='batch_imgs',
+        help='一次选择多张图片，自动按顺序添加'
+    )
+    if batch_files:
+        for bf in batch_files:
+            temp_path = os.path.join(OUTPUT_DIR, f'appendix_batch_{bf.name}')
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            with open(temp_path, 'wb') as f:
+                f.write(bf.getbuffer())
+            # 取文件名（去掉扩展名）作为默认标题
+            caption = os.path.splitext(bf.name)[0]
+            imgs.append({'caption': caption, 'path': temp_path})
+        st.rerun()
+
     to_del = []
     for i, img in enumerate(imgs):
         c1, c2, c3 = st.columns([3, 4, 0.5])
