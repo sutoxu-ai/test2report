@@ -705,15 +705,21 @@ with st.expander("六、附图（可上传多张图片）", expanded=True):
         help='一次选择多张图片，自动按顺序添加'
     )
     if batch_files:
+        # 获取已存在的图片路径，防止重复添加
+        existing_paths = {img['path'] for img in imgs if img.get('path')}
+        new_added = False
         for bf in batch_files:
             temp_path = os.path.join(OUTPUT_DIR, f'appendix_batch_{bf.name}')
+            if temp_path in existing_paths:
+                continue  # 已添加过，跳过
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             with open(temp_path, 'wb') as f:
                 f.write(bf.getbuffer())
-            # 取文件名（去掉扩展名）作为默认标题
             caption = os.path.splitext(bf.name)[0]
             imgs.append({'caption': caption, 'path': temp_path})
-        st.rerun()
+            new_added = True
+        if new_added:
+            st.rerun()
 
     to_del = []
     for i, img in enumerate(imgs):
