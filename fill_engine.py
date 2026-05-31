@@ -212,11 +212,12 @@ def fill_document(template_path, output_path, data):
                     _safe_set_font_color(run, BLACK)
                     break
 
-    # 1d. 检测日期 — 封面
+    # 1d. 检测日期 — 封面 + 首页（表1）
     date_str = data.get('test_date', '')
     # 用于正则解析：把顿号替换成横杠，例：'2026、05、08' → '2026-05-08'
     normalized = re.sub(r'[、，]', '-', date_str.strip())
 
+    # 封面检测日期
     for loc, p in all_p:
         full = p.text.strip()
         full_nocolon = full.replace('：', ':').replace('\uff1a', ':')
@@ -238,6 +239,19 @@ def fill_document(template_path, output_path, data):
                         _safe_set_run_text(run, date_str if i == 0 else '')
                         _safe_set_font_color(run, BLACK)
             break
+
+    # 首页（表1）检测日期 — 长格式：YYYY年MM月DD日
+    if len(doc.tables) > 1:
+        t_home = doc.tables[1]
+        if len(t_home.rows) > 8 and len(t_home.rows[8].cells) > 3:
+            parts = re.match(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})', normalized)
+            if parts:
+                y, m, d = parts.groups()
+                long_date = f'{y}年{m.zfill(2)}月{d.zfill(2)}日'
+            else:
+                long_date = date_str
+            for p in t_home.rows[8].cells[3].paragraphs:
+                _set_runs_text(p, long_date, True)
 
     # 1e. 报告日期 — 封面 + 首页
     # 模板中有多处 YYYY年MM月DD日 红色字段（封面、首页等），需全部填充
@@ -362,23 +376,13 @@ def fill_document(template_path, output_path, data):
                 for p in t_home.rows[7].cells[3].paragraphs:
                     _set_runs_text(p, foundation_area, True)
 
-        # 4d. 抽检数量 / 检测日期 row[8].cell[1] + row[8].cell[3]
+        # 4d. 抽检数量 row[8].cell[1]
         if len(t_home.rows) > 8:
             sc = data.get('sample_count', '')
             if sc and len(t_home.rows[8].cells) > 1:
                 display_sc = str(sc) + '点' if not str(sc).endswith('点') else str(sc)
                 for p in t_home.rows[8].cells[1].paragraphs:
                     _set_runs_text(p, display_sc, True)
-            if len(t_home.rows[8].cells) > 3:
-                # 用 normalized 解析（顿号已替换为-）
-                parts = re.match(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})', normalized)
-                if parts:
-                    y, m, d = parts.groups()
-                    short_date = f'{y}.{m.zfill(2)}.{d.zfill(2)}'
-                else:
-                    short_date = date_str
-                for p in t_home.rows[8].cells[3].paragraphs:
-                    _set_runs_text(p, short_date, True)
 
         # 4e. 总进尺 / 检测深度 row[9].cell[1] + row[9].cell[3]
         if len(t_home.rows) > 9:
@@ -735,6 +739,21 @@ def fill_document(template_path, output_path, data):
                 for ci, col_key in enumerate(['point_id', 'depth', 'blows']):
                     if ci < len(new_row.cells):
                         _safe_set_cell_text(new_row.cells[ci], str(rd.get(col_key, '')))
+            # 设置列宽（与表9协调，使两表总宽度一致）
+            tbl_grid = raw_table._tbl.find(qn('w:tblGrid'))
+            if tbl_grid is not None:
+                grid_cols = tbl_grid.findall(qn('w:gridCol'))
+                # 表8共3列：点号、孔深(m)、锤击数
+                # 表9共5列：土层、点号、标高(m)、平均值、承载力(kPa)
+                # 让两表总宽度接近，设置为 [1418, 1418, 2268] (总5104)
+                col_widths = [1418, 1418, 2268]
+                for i, w in enumerate(col_widths):
+                    if i < len(grid_cols):
+                        grid_cols[i].set(qn('w:w'), str(w))
+                    else:
+                        new_col = etree2.SubElement(tbl_grid, qn('w:gridCol'))
+                        new_col.set(qn('w:w'), str(w))
+            
             # 设置行高1cm (1cm = 28.35磅)
             for row in raw_table.rows:
                 row.height = Pt(28.35)
