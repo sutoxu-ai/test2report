@@ -537,22 +537,32 @@ def fill_document(template_path, output_path, data):
             break
 
     # ===== 9. 地质概况 =====
-    # 9-pre. 给"二、地质概况"标题段落加 pageBreakBefore，确保它永远从新页第一行开始
-    # （模板依赖空行撑页，内容较少时该标题前的空行会溢到新页成为第一行空白）
-    for loc, p in all_p:
-        if p.text.strip() == '二、地质概况' and not loc.startswith('table'):
-            pPr = p._element.find(f'{_W}pPr')
-            if pPr is None:
-                from docx.oxml import OxmlElement as _OxmlElement2
-                pPr = _OxmlElement2('w:pPr')
-                p._element.insert(0, pPr)
-            pbk = pPr.find(f'{_W}pageBreakBefore')
-            if pbk is None:
-                from docx.oxml import OxmlElement as _OxmlElement2
-                pbk = _OxmlElement2('w:pageBreakBefore')
-                pPr.append(pbk)
-            pbk.set(f'{_W}val', 'true')
-            break
+    # 9-pre. 在"二、地质概况"段落前插入独立分页符段落，确保它从新页开始。
+    # 注意：不用 pageBreakBefore，否则当前面内容已自然分页时会产生空白页。
+    body9 = doc.element.body
+    body9_children = list(body9)
+    geo_title_body_idx = None
+    for k, child in enumerate(body9_children):
+        if child.tag.endswith('}p'):
+            txt9 = re.sub(r'<[^>]+>', '', etree2.tostring(child, encoding='unicode')).strip()
+            if txt9 == '二、地质概况':
+                geo_title_body_idx = k
+                break
+    if geo_title_body_idx is not None:
+        # 检查前一个段落是否已经是分页符，避免重复插入
+        prev_child = body9_children[geo_title_body_idx - 1] if geo_title_body_idx > 0 else None
+        already_has_pb = False
+        if prev_child is not None and prev_child.tag.endswith('}p'):
+            prev_xml = etree2.tostring(prev_child, encoding='unicode')
+            if 'w:type="page"' in prev_xml or "w:type='page'" in prev_xml:
+                already_has_pb = True
+        if not already_has_pb:
+            pb_geo = doc.add_paragraph()
+            pb_geo.add_run('')
+            br_geo = etree2.SubElement(pb_geo.runs[0]._element, qn('w:br'))
+            br_geo.set(qn('w:type'), 'page')
+            body9.remove(pb_geo._element)
+            body9.insert(geo_title_body_idx, pb_geo._element)
 
     geo_mode = data.get('geo_mode', 'full')
     geo_layers = data.get('geo_layers', [])
@@ -739,20 +749,24 @@ def fill_document(template_path, output_path, data):
                 for ci, col_key in enumerate(['point_id', 'depth', 'blows']):
                     if ci < len(new_row.cells):
                         _safe_set_cell_text(new_row.cells[ci], str(rd.get(col_key, '')))
-            # 设置列宽（与表9协调，使两表总宽度一致）
+            # 设置列宽 — 与模板一致（总宽9633）
             tbl_grid = raw_table._tbl.find(qn('w:tblGrid'))
             if tbl_grid is not None:
                 grid_cols = tbl_grid.findall(qn('w:gridCol'))
-                # 表8共3列：点号、孔深(m)、锤击数
-                # 表9共5列：土层、点号、标高(m)、平均值、承载力(kPa)
-                # 让两表总宽度接近，设置为 [1418, 1418, 2268] (总5104)
-                col_widths = [1418, 1418, 2268]
+                col_widths = [1776, 1923, 5934]   # 表8: 点号、孔深、锤击数
                 for i, w in enumerate(col_widths):
                     if i < len(grid_cols):
                         grid_cols[i].set(qn('w:w'), str(w))
                     else:
                         new_col = etree2.SubElement(tbl_grid, qn('w:gridCol'))
                         new_col.set(qn('w:w'), str(w))
+            # 同步设置表格总宽
+            tblPr8 = raw_table._tbl.find(qn('w:tblPr'))
+            if tblPr8 is not None:
+                tblW8 = tblPr8.find(qn('w:tblW'))
+                if tblW8 is not None:
+                    tblW8.set(qn('w:w'), '9633')
+                    tblW8.set(qn('w:type'), 'dxa')
             
             # 设置行高1cm (1cm = 28.35磅)
             for row in raw_table.rows:
@@ -812,14 +826,21 @@ def fill_document(template_path, output_path, data):
                 if len(new_row.cells) > 4:
                     _safe_set_cell_text(new_row.cells[4], str(sd.get('bearing_capacity', '')))
 
-            # 设置列宽
+            # 设置列宽 — 与模板一致（总宽9645）
             tbl_grid = sum_table._tbl.find(qn('w:tblGrid'))
             if tbl_grid is not None:
                 grid_cols = tbl_grid.findall(qn('w:gridCol'))
-                col_widths = [1134, 1418, 1418, 1418, 1418]
+                col_widths = [1802, 1907, 1907, 1907, 2122]  # 表9: 土层、点号、标高、平均值、承载力
                 for i, w in enumerate(col_widths):
                     if i < len(grid_cols):
                         grid_cols[i].set(qn('w:w'), str(w))
+            # 同步设置表格总宽
+            tblPr9 = sum_table._tbl.find(qn('w:tblPr'))
+            if tblPr9 is not None:
+                tblW9 = tblPr9.find(qn('w:tblW'))
+                if tblW9 is not None:
+                    tblW9.set(qn('w:w'), '9645')
+                    tblW9.set(qn('w:type'), 'dxa')
 
             # 设置行高1cm (1cm = 28.35磅)
             for row in sum_table.rows:
